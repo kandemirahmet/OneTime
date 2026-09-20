@@ -1,0 +1,14 @@
+{
+  "manifest_version": 3,
+  "name": "OneTime",
+  "version": "1.0.0",
+  "description": "Send direct image URLs from the current Opera tab to the OneTime desktop app over localhost HTTP.",
+  "permissions": ["tabs"],
+  "host_permissions": ["http://127.0.0.1:8765/*"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "OneTime"
+  }
+}
