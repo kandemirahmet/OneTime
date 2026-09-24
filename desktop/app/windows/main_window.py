@@ -10,7 +10,10 @@ from PySide6.QtCore import QObject, QSettings, Qt, QThread, Signal, Slot
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
     QApplication,
+    QDialog,
+    QDialogButtonBox,
     QFileDialog,
+    QFormLayout,
     QHBoxLayout,
     QLabel,
     QListWidget,
@@ -22,6 +25,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from app.download_history import get_statistics, initialize_database, record_success
 from app.services.download_service import download_original
 from app.version import APP_VERSION
 
@@ -29,6 +33,7 @@ from app.version import APP_VERSION
 class DownloadWorker(QObject):
     progress = Signal(int, int, str)
     finished = Signal(int, int, list)
+    result = Signal(str, bool, str, str)
 
     def __init__(self, urls: list[str], output_dir: Path) -> None:
         super().__init__()
@@ -47,9 +52,15 @@ class DownloadWorker(QObject):
                 saved_path = download_original(url, self.output_dir)
                 successful += 1
                 results.append((url, True, str(saved_path), None))
+                try:
+                    record_success(url, saved_path.name, str(self.output_dir), saved_path.stat().st_size)
+                except Exception:
+                    pass
+                self.result.emit(url, True, str(saved_path), "")
             except (OSError, ValueError, urllib.error.URLError) as exc:
                 failed += 1
                 results.append((url, False, None, str(exc)))
+                self.result.emit(url, False, "", str(exc))
 
             self.progress.emit(index, total, url)
 
@@ -71,11 +82,14 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(680, 460)
 
         self.urls: list[str] = []
+        self.completed_urls: set[str] = set()
         self.default_output_dir = Path.home() / "Downloads" / "OneTime"
         self.settings = QSettings("OneTime", "OneTime")
         self.is_downloading = False
         self._download_thread: QThread | None = None
         self._download_worker: DownloadWorker | None = None
+        self.history_error: str | None = None
+        self.history_ready = True
 
         saved_output_dir = self.settings.value("output_dir", "", type=str)
         saved_path = Path(saved_output_dir).expanduser() if saved_output_dir else None
@@ -133,13 +147,72 @@ class MainWindow(QMainWindow):
         self.status = QLabel("Ready")
         self.layout.addWidget(self.status)
 
+        try:
+            initialize_database()
+        except RuntimeError as exc:
+            self.history_ready = False
+            self.history_error = str(exc)
+            self.status.setText("Download history unavailable")
+
         self._build_menu_bar()
 
     def _build_menu_bar(self) -> None:
         help_menu = self.menuBar().addMenu("Help")
+        stats_action = QAction("Statistics", self)
+        stats_action.triggered.connect(self.show_statistics_dialog)
+        help_menu.addAction(stats_action)
+
         about_action = QAction("About OneTime", self)
         about_action.triggered.connect(self.show_about_dialog)
         help_menu.addAction(about_action)
+
+    def show_statistics_dialog(self) -> None:
+        if not self.history_ready:
+            QMessageBox.warning(self, "Statistics", self.history_error or "Download history is unavailable.")
+            return
+
+        stats = get_statistics()
+        dialog = QDialog(self)
+        dialog.setWindowTitle("OneTime Statistics")
+        dialog.resize(360, 220)
+
+        layout = QFormLayout(dialog)
+        period_labels = {
+            "all_time": "All time",
+            "today": "Today",
+            "this_week": "This week",
+            "this_month": "This month",
+            "this_year": "This year",
+        }
+
+        for key, label in period_labels.items():
+            info = stats.get(key, {"count": 0, "bytes": 0})
+            count = info.get("count", 0)
+            size = self._format_size(info.get("bytes", 0))
+            layout.addRow(label, QLabel(f"{count} downloads · {size}"))
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        buttons.rejected.connect(dialog.reject)
+        buttons.accepted.connect(dialog.accept)
+        layout.addRow(buttons)
+        dialog.exec()
+
+    def _format_size(self, size_bytes: int) -> str:
+        units = ["B", "KB", "MB", "GB"]
+        value = float(max(size_bytes, 0))
+        unit_index = 0
+        while value >= 1024 and unit_index < len(units) - 1:
+            value /= 1024.0
+            unit_index += 1
+        if unit_index == 0:
+            return f"{int(value)} {units[unit_index]}"
+        return f"{value:.1f} {units[unit_index]}"
+
+    def _update_pending_status(self) -> None:
+        if not self.urls:
+            self.status.setText("No pending downloads.")
+            return
+        self.status.setText(f"{len(self.urls)} pending download(s)")
 
     def show_about_dialog(self) -> None:
         message = (
@@ -198,6 +271,17 @@ class MainWindow(QMainWindow):
         self.progress_label.setText("Ready")
         self.status.setText("Ready")
 
+    def _remove_url_from_pending(self, url: str) -> None:
+        if url not in self.urls:
+            return
+
+        self.urls.remove(url)
+        for index in range(self.list_widget.count()):
+            if self.list_widget.item(index).text() == url:
+                self.list_widget.takeItem(index)
+                break
+        self._update_pending_status()
+
     def _show_download_summary(self, successful: int, failed: int, results: list[tuple[str, bool, str | None, str | None]]) -> None:
         summary = f"Downloaded: {successful}\nFailed: {failed}"
         self.status.setText(summary)
@@ -212,6 +296,16 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Download", message)
         else:
             QMessageBox.information(self, "Download", summary)
+
+    @Slot(str, bool, str, str)
+    def _on_download_result(self, url: str, ok: bool, saved_path: str, error: str) -> None:
+        if ok:
+            self.completed_urls.add(url)
+            self._remove_url_from_pending(url)
+            return
+
+        if url in self.urls:
+            self._update_pending_status()
 
     def _on_download_progress(self, current: int, total: int, url: str) -> None:
         self._set_download_progress(current, total, url)
@@ -295,17 +389,30 @@ class MainWindow(QMainWindow):
 
         self._download_thread.started.connect(self._download_worker.run)
         self._download_worker.progress.connect(self._on_download_progress)
+        self._download_worker.result.connect(self._on_download_result)
         self._download_worker.finished.connect(self._on_download_finished)
         self._download_thread.finished.connect(self._cleanup_download_thread)
 
         self._download_thread.start()
 
     def add_urls(self, urls: list[str]) -> None:
+        seen: set[str] = set()
+        for url in self.urls:
+            seen.add(url)
+
         for url in urls:
-            if url not in self.urls:
-                self.urls.append(url)
-                self.list_widget.addItem(url)
-        self.status.setText(f"Received {len(self.urls)} image URL(s)")
+            if not isinstance(url, str) or not url:
+                continue
+            if url in seen or url in self.completed_urls:
+                continue
+            seen.add(url)
+            self.urls.append(url)
+            self.list_widget.addItem(url)
+
+        if self.urls:
+            self.status.setText(f"Received {len(self.urls)} image URL(s)")
+        else:
+            self.status.setText("No pending downloads.")
 
     def handle_native_message(self, payload: dict) -> None:
         if payload.get("type") != "image_tabs":

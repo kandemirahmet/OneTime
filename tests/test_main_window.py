@@ -2,6 +2,7 @@ import json
 import os
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -13,6 +14,7 @@ from PySide6.QtCore import QCoreApplication, QSettings
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QMessageBox
 
+from app.download_history import get_statistics, initialize_database, record_success
 from app.version import APP_VERSION
 from app.windows.main_window import MainWindow
 
@@ -22,6 +24,8 @@ def qt_app():
     app = QApplication.instance()
     if app is None:
         app = QApplication([])
+    app.setApplicationName("OneTime")
+    app.setApplicationVersion(APP_VERSION)
     return app
 
 
@@ -47,8 +51,8 @@ def wait_for(predicate, timeout_ms: int = 2000) -> bool:
     return bool(predicate())
 
 
-def test_version_constant_is_1_0_0():
-    assert APP_VERSION == "1.0.0"
+def test_version_constant_is_1_1_0():
+    assert APP_VERSION == "1.1.0"
 
 
 def test_qt_metadata_uses_app_version(qt_app):
@@ -66,14 +70,14 @@ def test_about_dialog_shows_version(qt_app, monkeypatch):
     window.show_about_dialog()
 
     assert captured["title"] == "About OneTime"
-    assert "1.0.0" in captured["text"]
+    assert "1.1.0" in captured["text"]
     window.close()
 
 
-def test_extension_manifest_version_is_1_0_0():
+def test_extension_manifest_version_is_1_1_0():
     manifest_path = Path(__file__).resolve().parent.parent / "extension" / "manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    assert manifest["version"] == "1.0.0"
+    assert manifest["version"] == "1.1.0"
 
 
 def test_no_saved_setting_uses_default_folder(qt_app, isolated_settings):
@@ -320,3 +324,116 @@ def test_download_worker_thread_cleanup_happens_after_completion(qt_app, isolate
     assert window.download_button.isEnabled() is True
 
     window.close()
+
+
+def test_successful_urls_disappear_and_session_completed_urls_are_not_readded(qt_app, isolated_settings, monkeypatch, tmp_path: Path):
+    def fake_download(url: str, output_dir: Path):
+        target = Path(output_dir) / Path(url).name
+        target.write_bytes(b"ok")
+        return target
+
+    monkeypatch.setattr("app.windows.main_window.download_original", fake_download)
+    monkeypatch.setattr(QMessageBox, "information", lambda *args, **kwargs: None)
+    monkeypatch.setattr(QMessageBox, "warning", lambda *args, **kwargs: None)
+
+    window = MainWindow()
+    window.output_dir = str(tmp_path)
+    window.add_urls(["https://example.com/one.png", "https://example.com/two.png", "https://example.com/one.png"])
+
+    assert window.list_widget.count() == 2
+    assert [window.list_widget.item(i).text() for i in range(window.list_widget.count())] == [
+        "https://example.com/one.png",
+        "https://example.com/two.png",
+    ]
+
+    window.download_button.click()
+    assert wait_for(lambda: not window.is_downloading)
+    assert window.list_widget.count() == 0
+    assert window.urls == []
+    assert window.completed_urls == {"https://example.com/one.png", "https://example.com/two.png"}
+
+    window.handle_native_message({
+        "type": "image_tabs",
+        "version": 1,
+        "browser": "opera",
+        "request_id": "new-batch",
+        "tabs": [
+            {"url": "https://example.com/one.png"},
+            {"url": "https://example.com/three.png"},
+            {"url": "https://example.com/three.png"},
+        ],
+    })
+
+    assert [window.list_widget.item(i).text() for i in range(window.list_widget.count())] == [
+        "https://example.com/three.png",
+    ]
+    window.close()
+
+
+def test_failed_urls_remain_retryable_and_new_urls_are_added_after_a_mixed_batch(qt_app, isolated_settings, monkeypatch, tmp_path: Path):
+    def fake_download(url: str, output_dir: Path):
+        if "fail" in url:
+            raise ValueError("bad image")
+        target = Path(output_dir) / Path(url).name
+        target.write_bytes(b"ok")
+        return target
+
+    monkeypatch.setattr("app.windows.main_window.download_original", fake_download)
+    monkeypatch.setattr(QMessageBox, "information", lambda *args, **kwargs: None)
+    monkeypatch.setattr(QMessageBox, "warning", lambda *args, **kwargs: None)
+
+    window = MainWindow()
+    window.output_dir = str(tmp_path)
+    window.add_urls(["https://example.com/fail.png", "https://example.com/good.png"])
+
+    window.download_button.click()
+    assert wait_for(lambda: not window.is_downloading)
+    assert [window.list_widget.item(i).text() for i in range(window.list_widget.count())] == ["https://example.com/fail.png"]
+    assert window.urls == ["https://example.com/fail.png"]
+
+    window.handle_native_message({
+        "type": "image_tabs",
+        "version": 1,
+        "browser": "opera",
+        "request_id": "retry",
+        "tabs": [
+            {"url": "https://example.com/fail.png"},
+            {"url": "https://example.com/new.png"},
+            {"url": "https://example.com/good.png"},
+        ],
+    })
+
+    assert [window.list_widget.item(i).text() for i in range(window.list_widget.count())] == [
+        "https://example.com/fail.png",
+        "https://example.com/new.png",
+    ]
+    window.close()
+
+
+def test_download_history_records_successes_and_statistics(tmp_path, monkeypatch):
+    monkeypatch.setenv("APPDATA", str(tmp_path))
+    initialize_database()
+
+    as_of = datetime(2024, 9, 20, 18, 30, tzinfo=timezone.utc)
+    record_success(
+        url="https://example.com/alpha.png",
+        filename="alpha.png",
+        destination=str(tmp_path / "downloads"),
+        file_size=1234,
+        downloaded_at=as_of,
+    )
+    record_success(
+        url="https://example.com/beta.png",
+        filename="beta.png",
+        destination=str(tmp_path / "downloads"),
+        file_size=5678,
+        downloaded_at=datetime(2024, 9, 21, 10, 15, tzinfo=timezone.utc),
+    )
+
+    stats = get_statistics(as_of=as_of)
+    assert stats["all_time"]["count"] == 2
+    assert stats["all_time"]["bytes"] == 6912
+    assert stats["today"]["count"] == 1
+    assert stats["this_week"]["count"] == 2
+    assert stats["this_month"]["count"] == 2
+    assert stats["this_year"]["count"] == 2

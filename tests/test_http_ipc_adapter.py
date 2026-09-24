@@ -1,11 +1,11 @@
 import json
+import os
+import subprocess
 import sys
 import types
 import urllib.error
 import urllib.request
 from pathlib import Path
-
-from PySide6.QtCore import QLockFile, QStandardPaths
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "desktop"))
 
@@ -183,39 +183,35 @@ def test_stop_releases_port():
     replacement.stop()
 
 
-def test_lock_is_acquired_and_released_cleanly():
-    lock_dir = Path(QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppDataLocation)) / "OneTime"
-    lock_dir.mkdir(parents=True, exist_ok=True)
-    lock = QLockFile(str(lock_dir / "one_time.lock"))
-    assert lock.tryLock(0) is True
-    lock.unlock()
-    assert lock.tryLock(0) is True
-    lock.unlock()
-
-
-def test_single_instance_guard_rejects_second_windows_instance(monkeypatch):
-    class FakeKernel32:
-        def __init__(self):
-            self._last_error = 0
-
-        def CreateMutexW(self, *args):
-            return 1
-
-        def GetLastError(self):
-            return self._last_error
-
-        def ReleaseMutex(self, handle):
-            return True
-
-        def CloseHandle(self, handle):
-            return True
-
-    fake_kernel = FakeKernel32()
-    fake_kernel._last_error = 183
-    monkeypatch.setattr(app_main.ctypes, "windll", types.SimpleNamespace(kernel32=fake_kernel), raising=False)
-    monkeypatch.setattr(app_main.os, "name", "nt")
-
+def test_windows_mutex_is_acquired_and_released_cleanly():
     guard = OneTimeSingleInstanceGuard()
-
-    assert guard.try_lock() is False
+    assert guard.try_lock() is True
     guard.release()
+    assert guard.try_lock() is True
+    guard.release()
+
+
+def test_single_instance_guard_rejects_second_instance():
+    first_guard = OneTimeSingleInstanceGuard()
+    assert first_guard.try_lock() is True
+
+    repo_root = Path(__file__).resolve().parent.parent
+    script = """
+import os
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(r'REPO_ROOT') / 'desktop'))
+from app.main import OneTimeSingleInstanceGuard
+
+guard = OneTimeSingleInstanceGuard()
+print(guard.try_lock())
+""".replace("REPO_ROOT", str(repo_root))
+
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(repo_root / "desktop") + os.pathsep + env.get("PYTHONPATH", "")
+    completed = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, env=env, cwd=str(repo_root))
+
+    assert completed.returncode == 0
+    assert completed.stdout.strip() == "False"
+
+    first_guard.release()

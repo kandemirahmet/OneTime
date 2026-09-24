@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import ctypes
-import os
+import ctypes.wintypes as wintypes
 import sys
 from pathlib import Path
 
@@ -13,50 +13,51 @@ from app.services.ipc_adapter import LocalHttpIpcAdapter
 from app.version import APP_VERSION
 from app.windows.main_window import MainWindow
 
-ERROR_ALREADY_EXISTS = 183
-
 
 class OneTimeSingleInstanceGuard:
+    _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    _kernel32.CreateMutexW.argtypes = [wintypes.LPCWSTR, wintypes.BOOL, wintypes.LPCWSTR]
+    _kernel32.CreateMutexW.restype = wintypes.HANDLE
+    _kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+    _kernel32.WaitForSingleObject.restype = wintypes.DWORD
+    _kernel32.ReleaseMutex.argtypes = [wintypes.HANDLE]
+    _kernel32.ReleaseMutex.restype = wintypes.BOOL
+    _kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    _kernel32.CloseHandle.restype = wintypes.BOOL
+
+    _WAIT_OBJECT_0 = 0
+    _WAIT_TIMEOUT = 0x00000102
+    _mutex_name = "Global\\OneTime_SingleInstance"
+
     def __init__(self) -> None:
-        self._mutex = None
+        self._mutex = self._kernel32.CreateMutexW(None, False, self._mutex_name)
+        if not self._mutex:
+            raise OSError(ctypes.get_last_error())
         self._owned = False
 
-        if os.name == "nt":
-            mutex_name = r"Global\OneTimeAppMutex"
-            self._mutex = ctypes.windll.kernel32.CreateMutexW(None, False, mutex_name)
-            if self._mutex is None:
-                self._owned = False
-                return
-
-            last_error = ctypes.windll.kernel32.GetLastError()
-            self._owned = last_error != ERROR_ALREADY_EXISTS
-            if not self._owned:
-                ctypes.windll.kernel32.CloseHandle(self._mutex)
-                self._mutex = None
-            return
-
-        app_data_root = os.environ.get("APPDATA") or str(Path.home() / "AppData" / "Roaming")
-        lock_dir = Path(app_data_root) / "OneTime"
-        lock_dir.mkdir(parents=True, exist_ok=True)
-        self._lock_path = lock_dir / "one_time.lock"
-        self._lock_path.touch(exist_ok=True)
-
     def try_lock(self) -> bool:
-        if os.name == "nt":
-            return self._owned
-        if not hasattr(self, "_lock_path"):
+        if self._mutex is None:
             return False
-        if not self._lock_path.exists():
-            self._lock_path.touch(exist_ok=True)
-        return True
+        wait_result = self._kernel32.WaitForSingleObject(self._mutex, 0)
+        if wait_result == self._WAIT_OBJECT_0:
+            self._owned = True
+            return True
+        return False
 
     def release(self) -> None:
-        if self._mutex is not None:
-            if self._owned:
-                ctypes.windll.kernel32.ReleaseMutex(self._mutex)
-            ctypes.windll.kernel32.CloseHandle(self._mutex)
+        if self._mutex is not None and self._owned:
+            self._kernel32.ReleaseMutex(self._mutex)
             self._owned = False
-            self._mutex = None
+
+    def __del__(self) -> None:
+        try:
+            if self._mutex is not None:
+                if self._owned:
+                    self.release()
+                self._kernel32.CloseHandle(self._mutex)
+        except Exception:
+            pass
+        self._mutex = None
 
 
 if __name__ == "__main__":
