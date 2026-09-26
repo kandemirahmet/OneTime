@@ -78,12 +78,28 @@ The dialog in `MainWindow.show_statistics_dialog()` displays these values in a u
 - `desktop/app/services/ipc_adapter.py` - HTTP listener and payload validation.
 - `desktop/app/services/download_service.py` - direct HTTP download logic.
 - `desktop/app/download_history.py` - SQLite history management and statistics.
+- `desktop/build/package.py` - automated packaging script creating the distribution ZIP archive.
+- `desktop/build/one_time.spec` - PyInstaller build specification with icon embedding and version metadata.
 - `extension/background.js` - Opera extension payload generation.
 - `extension/manifest.json` - extension metadata, including the version value.
+
+## Building and packaging a release
+
+To build the executable and create the full distribution ZIP package:
+
+```powershell
+python desktop/build/package.py
+```
+
+This command:
+1. Runs PyInstaller using `desktop/build/one_time.spec` with embedded application icon and metadata.
+2. Stages the compiled `OneTime/` folder, the `extension/` folder, and `README.md` into `OneTime-v<version>-windows-x64/`.
+3. Generates the final distribution archive at `dist/OneTime-v<version>-windows-x64.zip`.
 
 ## Runtime notes
 
 The desktop app must already be running before the Opera extension sends image payloads. OneTime currently targets Opera, and the HTTP transport remains a local localhost-only interface with payload version 1.
 
 The application is intentionally conservative about the protocol: it does not change the request path, validation rules, database file layout, or byte-preservation behavior between releases.
+
 

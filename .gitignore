@@ -16,6 +16,7 @@ __pycache__/
 # Keep the reproducible PyInstaller specification; ignore all other build files.
 /desktop/build/*
 !/desktop/build/one_time.spec
+!/desktop/build/package.py
 
 # Editor/IDE artifacts
 .vscode/
