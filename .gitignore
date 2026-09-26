@@ -10,8 +10,12 @@ __pycache__/
 *.egg-info/
 
 # Generated packaging output
-build/
-dist/
+/build/
+/dist/
+
+# Keep the reproducible PyInstaller specification; ignore all other build files.
+/desktop/build/*
+!/desktop/build/one_time.spec
 
 # Editor/IDE artifacts
 .vscode/

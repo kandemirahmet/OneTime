@@ -7,11 +7,19 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 from app.services.ipc_adapter import LocalHttpIpcAdapter
 from app.version import APP_VERSION
 from app.windows.main_window import MainWindow
+
+
+def application_icon_path() -> Path:
+    """Return the bundled icon path, or the project icon during development."""
+    if getattr(sys, "frozen", False):
+        return Path(sys._MEIPASS) / "OneTime.ico"
+    return Path(__file__).resolve().parents[2] / "OneTime.ico"
 
 
 class OneTimeSingleInstanceGuard:
@@ -64,12 +72,15 @@ if __name__ == "__main__":
     app = QApplication(sys.argv)
     app.setApplicationName("OneTime")
     app.setApplicationVersion(APP_VERSION)
+    app_icon = QIcon(str(application_icon_path()))
+    app.setWindowIcon(app_icon)
     single_instance = OneTimeSingleInstanceGuard()
     if not single_instance.try_lock():
         QMessageBox.critical(None, "OneTime", "OneTime is already running.")
         sys.exit(0)
 
     window = MainWindow()
+    window.setWindowIcon(app_icon)
     window.native_message_received.connect(window.handle_native_message)
     ipc_adapter = LocalHttpIpcAdapter(window.native_message_received.emit)
     try:
